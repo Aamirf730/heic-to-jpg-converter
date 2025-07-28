@@ -4,19 +4,12 @@ import uuid
 import io
 import zipfile
 import tempfile
-import subprocess
 from werkzeug.utils import secure_filename
-from PIL import Image
-import pillow_heif
 import imageio
 import numpy as np
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
-
-# Register HEIF opener
-pillow_heif.register_heif_opener()
-print("✅ HEIF opener registered successfully")
 
 # Store session data in memory (in production, use a proper database)
 sessions = {}
@@ -77,77 +70,57 @@ def convert_file():
         print(f"File exists: {os.path.exists(session_data['file_path'])}")
         print(f"File size: {os.path.getsize(session_data['file_path'])} bytes")
         
-        # Try to open the image
-        img = None
+        # Try to open the image with imageio
+        img_array = None
         open_error = None
         
         try:
-            # Try Pillow first (works well with pillow-heif for HEIC files)
-            img = Image.open(session_data['file_path'])
-            print(f"Opened image with Pillow: {img.format}, size: {img.size}, mode: {img.mode}")
+            # For HEIC files, try to specify format explicitly
+            if session_data['file_path'].lower().endswith(('.heic', '.heif')):
+                # Try with explicit format specification
+                img_array = imageio.imread(session_data['file_path'], format='HEIF')
+                print(f"Opened HEIC image with explicit format: shape: {img_array.shape}, dtype: {img_array.dtype}")
+            else:
+                # For other formats, use default imageio
+                img_array = imageio.imread(session_data['file_path'])
+                print(f"Opened image with imageio: shape: {img_array.shape}, dtype: {img_array.dtype}")
         except Exception as e:
-            print(f"Failed to open with Pillow: {e}")
+            print(f"Failed to open with imageio: {e}")
             open_error = e
             
-            # Try imageio as fallback for non-HEIC files
-            if not session_data['file_path'].lower().endswith(('.heic', '.heif')):
+            # Try alternative approach for HEIC files
+            if session_data['file_path'].lower().endswith(('.heic', '.heif')):
                 try:
+                    # Try without format specification
                     img_array = imageio.imread(session_data['file_path'])
-                    print(f"Opened image with imageio: shape: {img_array.shape}, dtype: {img_array.dtype}")
-                    
-                    # Convert numpy array to PIL Image
-                    if len(img_array.shape) == 3 and img_array.shape[2] == 4:
-                        # RGBA to RGB with white background
-                        rgb_array = np.zeros((img_array.shape[0], img_array.shape[1], 3), dtype=img_array.dtype)
-                        alpha = img_array[:, :, 3:4] / 255.0
-                        rgb_array = img_array[:, :, :3] * alpha + (1 - alpha) * 255
-                        img_array = rgb_array.astype(np.uint8)
-                        print(f"Converted RGBA to RGB")
-                    elif len(img_array.shape) == 2:
-                        # Grayscale to RGB
-                        img_array = np.stack([img_array] * 3, axis=-1)
-                        print(f"Converted grayscale to RGB")
-                    
-                    img = Image.fromarray(img_array)
-                    print(f"Converted imageio array to PIL Image: {img.size}, mode: {img.mode}")
-                except Exception as imageio_error:
-                    print(f"Failed to open with imageio: {imageio_error}")
+                    print(f"Opened HEIC image without format spec: shape: {img_array.shape}, dtype: {img_array.dtype}")
+                except Exception as e2:
+                    print(f"Failed alternative HEIC approach: {e2}")
                     raise open_error
             else:
                 raise open_error
         
-        if img is None:
+        if img_array is None:
             raise open_error
         
         # Convert to RGB if necessary
-        if img.mode in ('RGBA', 'LA', 'P'):
-            # Create a white background for transparent images
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            if img.mode == 'P':
-                img = img.convert('RGBA')
-            background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
-            img = background
-        elif img.mode != 'RGB':
-            img = img.convert('RGB')
+        if len(img_array.shape) == 3 and img_array.shape[2] == 4:
+            # RGBA to RGB with white background
+            rgb_array = np.zeros((img_array.shape[0], img_array.shape[1], 3), dtype=img_array.dtype)
+            alpha = img_array[:, :, 3:4] / 255.0
+            rgb_array = img_array[:, :, :3] * alpha + (1 - alpha) * 255
+            img_array = rgb_array.astype(np.uint8)
+            print(f"Converted RGBA to RGB")
+        elif len(img_array.shape) == 2:
+            # Grayscale to RGB
+            img_array = np.stack([img_array] * 3, axis=-1)
+            print(f"Converted grayscale to RGB")
         
         # Prepare output
         output_buffer = io.BytesIO()
         
-        # Save as JPEG
-        save_kwargs = {
-            'format': 'JPEG',
-            'quality': quality,
-            'optimize': True
-        }
-        
-        if strip_exif:
-            # Create a new image without EXIF data
-            img_without_exif = Image.new(img.mode, img.size)
-            img_without_exif.putdata(list(img.getdata()))
-            img_without_exif.save(output_buffer, **save_kwargs)
-        else:
-            img.save(output_buffer, **save_kwargs)
-        
+        # Save as JPEG using imageio
+        imageio.imwrite(output_buffer, img_array, format='JPEG', quality=quality)
         output_buffer.seek(0)
         
         # Save converted file
