@@ -2,7 +2,8 @@ from flask import Flask, render_template, request, jsonify, send_file, session
 import os
 import uuid
 from werkzeug.utils import secure_filename
-from PIL import Image
+import cv2
+import numpy as np
 import io
 import base64
 from datetime import datetime
@@ -106,37 +107,23 @@ def convert_file():
         # Try to open the image
         img = None
         try:
-            img = Image.open(session_data['file_path'])
-            print(f"Opened image: {img.format}, size: {img.size}, mode: {img.mode}")
+            img = cv2.imread(session_data['file_path'])
+            print(f"Opened image: {img.shape}, mode: {img.dtype}")
         except Exception as open_error:
             print(f"Failed to open with default method: {open_error}")
             # Try alternative method for HEIC with different parameters
             try:
                 import pillow_heif
                 heif_file = pillow_heif.read_heif(session_data['file_path'], convert_hdr_to_8bit=True)
-                img = Image.frombytes(
-                    heif_file.mode, 
-                    heif_file.size, 
-                    heif_file.data,
-                    "raw",
-                    heif_file.mode,
-                    heif_file.stride,
-                )
-                print(f"Opened HEIC with pillow_heif: size: {img.size}, mode: {img.mode}")
+                img = cv2.imdecode(np.frombuffer(heif_file.data, np.uint8), cv2.IMREAD_UNCHANGED)
+                print(f"Opened HEIC with pillow_heif: size: {img.shape}, mode: {img.dtype}")
             except Exception as heif_error:
                 print(f"Failed to open with pillow_heif: {heif_error}")
                 # Try one more approach with different parameters
                 try:
                     heif_file = pillow_heif.read_heif(session_data['file_path'], convert_hdr_to_8bit=True, bgr_mode=False)
-                    img = Image.frombytes(
-                        heif_file.mode, 
-                        heif_file.size, 
-                        heif_file.data,
-                        "raw",
-                        heif_file.mode,
-                        heif_file.stride,
-                    )
-                    print(f"Opened HEIC with pillow_heif (alternative): size: {img.size}, mode: {img.mode}")
+                    img = cv2.imdecode(np.frombuffer(heif_file.data, np.uint8), cv2.IMREAD_UNCHANGED)
+                    print(f"Opened HEIC with pillow_heif (alternative): size: {img.shape}, mode: {img.dtype}")
                 except Exception as heif_error2:
                     print(f"Failed to open with pillow_heif (alternative): {heif_error2}")
                     # Try using macOS sips as final fallback
@@ -157,8 +144,8 @@ def convert_file():
                         
                         if result.returncode == 0:
                             # Open the converted file with Pillow
-                            img = Image.open(temp_output.name)
-                            print(f"Opened HEIC with sips: size: {img.size}, mode: {img.mode}")
+                            img = cv2.imread(temp_output.name)
+                            print(f"Opened HEIC with sips: size: {img.shape}, mode: {img.dtype}")
                             # Clean up temp file
                             os.unlink(temp_output.name)
                         else:
@@ -172,49 +159,48 @@ def convert_file():
             return jsonify({'error': 'Failed to open image file'}), 500
         
         # Convert to RGB if necessary (handle various color modes)
-        if img.mode not in ('RGB', 'L'):
-            if img.mode in ('RGBA', 'LA', 'P', 'CMYK', 'YCbCr', 'LAB', 'HSV', 'I', 'F'):
-                img = img.convert('RGB')
-                print(f"Converted from {img.mode} to RGB mode")
-            elif img.mode == 'L':
-                # Grayscale - keep as is
-                pass
-            else:
-                # For any other mode, convert to RGB
-                img = img.convert('RGB')
-                print(f"Converted from {img.mode} to RGB mode")
+        if img.shape[2] == 4: # Check for alpha channel
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR) # Convert BGRA to BGR
+            print(f"Converted from BGRA to BGR mode")
+        elif img.shape[2] == 3: # Check for RGB
+            pass # Already RGB
+        elif img.shape[2] == 2: # Check for grayscale
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) # Convert grayscale to BGR
+            print(f"Converted from grayscale to BGR mode")
+        elif img.shape[2] == 1: # Check for single channel
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) # Convert single channel to BGR
+            print(f"Converted from single channel to BGR mode")
         
         # Prepare output
         output_buffer = io.BytesIO()
         
         # Determine output format and quality
         if output_format == 'jpeg':
-            img.save(output_buffer, format='JPEG', quality=90, optimize=True)
+            img_encoded = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1]
         elif output_format == 'png':
-            img.save(output_buffer, format='PNG', optimize=True)
+            img_encoded = cv2.imencode('.png', img, [cv2.IMWRITE_PNG_COMPRESSION, 9])[1]
         elif output_format == 'webp':
-            img.save(output_buffer, format='WebP', quality=90, method=6)
+            img_encoded = cv2.imencode('.webp', img, [cv2.IMWRITE_WEBP_QUALITY, 90])[1]
         else:
-            img.save(output_buffer, format='JPEG', quality=90, optimize=True)
+            img_encoded = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1]
         
+        output_buffer.write(img_encoded)
         output_buffer.seek(0)
         
-        # Strip EXIF if requested
+        # Strip EXIF if requested (OpenCV automatically strips EXIF data)
         if strip_exif:
-            # Create new image without EXIF
-            img_without_exif = Image.new(img.mode, img.size)
-            img_without_exif.putdata(list(img.getdata()))
-            
+            # OpenCV automatically strips EXIF data when encoding, so we just re-encode
             output_buffer = io.BytesIO()
             if output_format == 'jpeg':
-                img_without_exif.save(output_buffer, format='JPEG', quality=90, optimize=True)
+                img_encoded = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1]
             elif output_format == 'png':
-                img_without_exif.save(output_buffer, format='PNG', optimize=True)
+                img_encoded = cv2.imencode('.png', img, [cv2.IMWRITE_PNG_COMPRESSION, 9])[1]
             elif output_format == 'webp':
-                img_without_exif.save(output_buffer, format='WebP', quality=90, method=6)
+                img_encoded = cv2.imencode('.webp', img, [cv2.IMWRITE_WEBP_QUALITY, 90])[1]
             else:
-                img_without_exif.save(output_buffer, format='JPEG', quality=90, optimize=True)
+                img_encoded = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1]
             
+            output_buffer.write(img_encoded)
             output_buffer.seek(0)
         
         # Update session with converted data
