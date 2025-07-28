@@ -6,15 +6,11 @@ import zipfile
 import tempfile
 import subprocess
 from werkzeug.utils import secure_filename
-from PIL import Image
-import pillow_heif
+import imageio
+import numpy as np
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
-
-# Register HEIF opener
-pillow_heif.register_heif_opener()
-print("✅ HEIF opener registered successfully")
 
 # Store session data in memory (in production, use a proper database)
 sessions = {}
@@ -75,87 +71,60 @@ def convert_file():
         print(f"File exists: {os.path.exists(session_data['file_path'])}")
         print(f"File size: {os.path.getsize(session_data['file_path'])} bytes")
         
-        # Try to open the image
-        img = None
+        # Try to open the image with imageio
+        img_array = None
         open_error = None
         
         try:
-            # Try default method first
-            img = Image.open(session_data['file_path'])
-            print(f"Opened image: {img.format}, size: {img.size}, mode: {img.mode}")
+            # Try imageio first
+            img_array = imageio.imread(session_data['file_path'])
+            print(f"Opened image with imageio: shape: {img_array.shape}, dtype: {img_array.dtype}")
         except Exception as e:
-            print(f"Failed to open with default method: {e}")
+            print(f"Failed to open with imageio: {e}")
             open_error = e
             
-            # Try pillow_heif for HEIC files
+            # Try macOS sips as fallback for HEIC files
             if session_data['file_path'].lower().endswith(('.heic', '.heif')):
                 try:
-                    heif_file = pillow_heif.read_heif(session_data['file_path'])
-                    img = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data, "raw", heif_file.mode, heif_file.stride)
-                    print(f"Opened HEIC image: {img.size}, mode: {img.mode}")
-                except Exception as heif_error:
-                    print(f"Failed to open with pillow_heif: {heif_error}")
+                    temp_jpg = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+                    temp_jpg.close()
                     
-                    # Try alternative pillow_heif method
-                    try:
-                        heif_file = pillow_heif.read_heif(session_data['file_path'], convert_hdr_to_8bit=True)
-                        img = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data, "raw", heif_file.mode, heif_file.stride)
-                        print(f"Opened HEIC image (alternative): {img.size}, mode: {img.mode}")
-                    except Exception as heif_error2:
-                        print(f"Failed to open with pillow_heif (alternative): {heif_error2}")
-                        
-                        # Try macOS sips as last resort
-                        try:
-                            temp_jpg = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-                            temp_jpg.close()
-                            
-                            result = subprocess.run(['sips', '-s', 'format', 'jpeg', session_data['file_path'], '--out', temp_jpg.name], 
-                                                  capture_output=True, text=True, timeout=30)
-                            
-                            if result.returncode == 0:
-                                img = Image.open(temp_jpg.name)
-                                print(f"Opened HEIC image with sips: {img.size}, mode: {img.mode}")
-                                # Clean up temp file
-                                os.unlink(temp_jpg.name)
-                            else:
-                                print(f"sips failed: {result.stderr}")
-                                raise Exception("All HEIC opening methods failed")
-                        except Exception as sips_error:
-                            print(f"sips method failed: {sips_error}")
-                            raise open_error
+                    result = subprocess.run(['sips', '-s', 'format', 'jpeg', session_data['file_path'], '--out', temp_jpg.name], 
+                                          capture_output=True, text=True, timeout=30)
+                    
+                    if result.returncode == 0:
+                        img_array = imageio.imread(temp_jpg.name)
+                        print(f"Opened HEIC image with sips: shape: {img_array.shape}, dtype: {img_array.dtype}")
+                        # Clean up temp file
+                        os.unlink(temp_jpg.name)
+                    else:
+                        print(f"sips failed: {result.stderr}")
+                        raise Exception("All HEIC opening methods failed")
+                except Exception as sips_error:
+                    print(f"sips method failed: {sips_error}")
+                    raise open_error
         
-        if img is None:
+        if img_array is None:
             raise open_error
         
         # Convert to RGB if necessary
-        if img.mode in ('RGBA', 'LA', 'P'):
-            # Create a white background for transparent images
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            if img.mode == 'P':
-                img = img.convert('RGBA')
-            background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
-            img = background
-        elif img.mode != 'RGB':
-            img = img.convert('RGB')
+        if len(img_array.shape) == 3 and img_array.shape[2] == 4:
+            # RGBA to RGB with white background
+            rgb_array = np.zeros((img_array.shape[0], img_array.shape[1], 3), dtype=img_array.dtype)
+            alpha = img_array[:, :, 3:4] / 255.0
+            rgb_array = img_array[:, :, :3] * alpha + (1 - alpha) * 255
+            img_array = rgb_array.astype(np.uint8)
+            print(f"Converted RGBA to RGB")
+        elif len(img_array.shape) == 2:
+            # Grayscale to RGB
+            img_array = np.stack([img_array] * 3, axis=-1)
+            print(f"Converted grayscale to RGB")
         
         # Prepare output
         output_buffer = io.BytesIO()
         
-        # Save as JPEG
-        save_kwargs = {
-            'format': 'JPEG',
-            'quality': quality,
-            'optimize': True
-        }
-        
-        if strip_exif:
-            # Create a new image without EXIF data
-            img_without_exif = Image.new(img.mode, img.size)
-            img_without_exif.putdata(list(img.getdata()))
-            img_without_exif.save(output_buffer, **save_kwargs)
-        else:
-            img.save(output_buffer, **save_kwargs)
-        
+        # Save as JPEG using imageio
+        imageio.imwrite(output_buffer, img_array, format='JPEG', quality=quality)
         output_buffer.seek(0)
         
         # Save converted file

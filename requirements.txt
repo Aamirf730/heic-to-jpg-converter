@@ -1,5 +1,5 @@
 Flask==2.3.3
-Pillow==10.2.0
-pillow-heif==0.15.0
+imageio==2.31.5
+imageio-ffmpeg==0.4.9
 Werkzeug==2.3.7
 setuptools>=65.0.0 
