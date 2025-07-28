@@ -1,0 +1,18 @@
+---
+description: "When the user describes an issue, find and explain the root cause without implementing a fix. Then ask if you should proceed. Only after explicit confirmation, plan a fix and ask again before starting implementation."
+
+trigger: "User describes an issue, bug, or problem. or ask a question"
+
+behavior:
+  - Do not provide any code or fix initially
+  - Analyze the issue and explain the root cause in detail
+  - Clearly explain what the issue is, why it occurs, and what it impacts
+  - Ask: "Would you like me to proceed with planning a fix?"
+  - If the user responds with confirmation (e.g., 'yes', 'proceed', 'go ahead'), then create a detailed, step-by-step plan for the fix
+  - Explain the plan and ask: "Shall I begin implementing this plan?"
+  - Only if the user confirms again, proceed with implementation
+  - Do not assume permission—wait for explicit confirmation before each step
+  - If user's confirmation is vague, ask again to ensure clarity before proceeding
+
+alwaysApply: true
+---

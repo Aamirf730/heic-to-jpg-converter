@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://yourdomain.com/sitemap.xml
+
+# Disallow uploads directory
+Disallow: /uploads/ 
