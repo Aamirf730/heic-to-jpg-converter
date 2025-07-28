@@ -8,16 +8,16 @@ import io
 import base64
 from datetime import datetime
 import zipfile
+import imageio
 
-# Import pillow_heif to enable HEIC support
+# Try to import imageio-ffmpeg for better format support
 try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-    print("✅ HEIF opener registered successfully")
+    import imageio_ffmpeg
+    print("✅ imageio-ffmpeg available for enhanced format support")
 except ImportError:
-    print("❌ Warning: pillow_heif not available. HEIC files may not be supported.")
+    print("⚠️ imageio-ffmpeg not available, using basic imageio")
 except Exception as e:
-    print(f"❌ Error registering HEIF opener: {e}")
+    print(f"❌ Error importing imageio-ffmpeg: {e}")
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -107,53 +107,55 @@ def convert_file():
         # Try to open the image
         img = None
         try:
+            # Try OpenCV first
             img = cv2.imread(session_data['file_path'])
-            print(f"Opened image: {img.shape}, mode: {img.dtype}")
+            if img is not None:
+                print(f"Opened image with OpenCV: {img.shape}, mode: {img.dtype}")
+            else:
+                raise Exception("OpenCV could not read the file")
         except Exception as open_error:
-            print(f"Failed to open with default method: {open_error}")
-            # Try alternative method for HEIC with different parameters
+            print(f"Failed to open with OpenCV: {open_error}")
+            # Try imageio for HEIC support
             try:
-                import pillow_heif
-                heif_file = pillow_heif.read_heif(session_data['file_path'], convert_hdr_to_8bit=True)
-                img = cv2.imdecode(np.frombuffer(heif_file.data, np.uint8), cv2.IMREAD_UNCHANGED)
-                print(f"Opened HEIC with pillow_heif: size: {img.shape}, mode: {img.dtype}")
-            except Exception as heif_error:
-                print(f"Failed to open with pillow_heif: {heif_error}")
-                # Try one more approach with different parameters
+                img_array = imageio.imread(session_data['file_path'])
+                # Convert to BGR format for OpenCV
+                if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                    img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+                elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
+                    img = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+                else:
+                    img = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+                print(f"Opened HEIC with imageio: size: {img.shape}, mode: {img.dtype}")
+            except Exception as imageio_error:
+                print(f"Failed to open with imageio: {imageio_error}")
+                # Try using macOS sips as final fallback
                 try:
-                    heif_file = pillow_heif.read_heif(session_data['file_path'], convert_hdr_to_8bit=True, bgr_mode=False)
-                    img = cv2.imdecode(np.frombuffer(heif_file.data, np.uint8), cv2.IMREAD_UNCHANGED)
-                    print(f"Opened HEIC with pillow_heif (alternative): size: {img.shape}, mode: {img.dtype}")
-                except Exception as heif_error2:
-                    print(f"Failed to open with pillow_heif (alternative): {heif_error2}")
-                    # Try using macOS sips as final fallback
-                    try:
-                        import subprocess
-                        import tempfile
-                        
-                        # Create a temporary file for the converted image
-                        temp_output = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-                        temp_output.close()
-                        
-                        # Use sips to convert HEIC to JPEG
-                        result = subprocess.run([
-                            'sips', '-s', 'format', 'jpeg', 
-                            session_data['file_path'], 
-                            '--out', temp_output.name
-                        ], capture_output=True, text=True)
-                        
-                        if result.returncode == 0:
-                            # Open the converted file with Pillow
-                            img = cv2.imread(temp_output.name)
-                            print(f"Opened HEIC with sips: size: {img.shape}, mode: {img.dtype}")
-                            # Clean up temp file
-                            os.unlink(temp_output.name)
-                        else:
-                            print(f"sips conversion failed: {result.stderr}")
-                            raise open_error
-                    except Exception as sips_error:
-                        print(f"Failed to open with sips: {sips_error}")
+                    import subprocess
+                    import tempfile
+                    
+                    # Create a temporary file for the converted image
+                    temp_output = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+                    temp_output.close()
+                    
+                    # Use sips to convert HEIC to JPEG
+                    result = subprocess.run([
+                        'sips', '-s', 'format', 'jpeg', 
+                        session_data['file_path'], 
+                        '--out', temp_output.name
+                    ], capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        # Open the converted file with OpenCV
+                        img = cv2.imread(temp_output.name)
+                        print(f"Opened HEIC with sips: size: {img.shape}, mode: {img.dtype}")
+                        # Clean up temp file
+                        os.unlink(temp_output.name)
+                    else:
+                        print(f"sips conversion failed: {result.stderr}")
                         raise open_error
+                except Exception as sips_error:
+                    print(f"Failed to open with sips: {sips_error}")
+                    raise open_error
         
         if img is None:
             return jsonify({'error': 'Failed to open image file'}), 500
